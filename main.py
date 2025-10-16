@@ -73,9 +73,6 @@ def play():
         lower = sma - num_std * std
         return upper, lower
 
-    # Strong months for calendar filter
-    strong_months = {4, 11}
-
     all_trades = []
 
     # Process each stock file
@@ -140,15 +137,13 @@ def play():
             if position is None:
                 # Buy Conditions:
                 price_discount = (hma_100 - adj_close) / hma_100 if hma_100 != 0 else 0
-                cond_price = price_discount >= 0.3
+                cond_price = price_discount >= 0.10
                 cond_rsi = rsi < 30
-                cond_macd = (macd_hist > 0) and (prev_macd_hist <= 0)
-                cond_stoch = (prev_k < prev_d) and (stoch_k > stoch_d) and (stoch_k < 20)
-                cond_vol = volume > 1.5 * avg_vol
-                cond_volatility = (atr / adj_close < 0.03) and (bb_lower < adj_close < bb_upper)
-                cond_month = month in strong_months
+                cond_stoch = (prev_k < prev_d) and (stoch_k > stoch_d) and (stoch_k < 40)
+                cond_vol = volume > 1.2 * avg_vol
+                cond_volatility = (atr / adj_close < 0.05) and (bb_lower < adj_close < bb_upper)
 
-                buy_signal = all([cond_price, cond_rsi, cond_macd, cond_stoch, cond_vol, cond_volatility, cond_month])
+                buy_signal = all([cond_price,cond_volatility,cond_vol,cond_stoch,cond_rsi])
 
                 if buy_signal:
                     position = {
@@ -169,11 +164,11 @@ def play():
                     max_price = adj_close
 
                 cond_price_sell = adj_close > ema_100
-                cond_trailing_stop = adj_close < 0.95 * max_price
+                cond_trailing_stop = adj_close < 0.96 * max_price
                 cond_atr_stop = adj_close < position['Stop Loss']
-                cond_rsi_sell = rsi > 70
+                cond_rsi_sell = rsi > 65
                 cond_macd_sell = (macd_hist < 0) and (prev_macd_hist >= 0)
-                cond_max_days = holding_days > 40
+                cond_max_days = holding_days > 60
                 cond_eoy = (i == len(year_data) - 1)
 
                 sell_signal = any([
@@ -236,9 +231,32 @@ def play():
     # Compile all trades into DataFrame
     trades_df = pd.DataFrame(all_trades)
     if not trades_df.empty:
-        trades_df.sort_values('Buy Date', inplace=True)
-        trades_df.to_csv(os.path.join(results_dir, f"{theYear}_perf.csv"), index=False)
-        print(f"Saved results to {os.path.join(results_dir, f'{theYear}_perf.csv')}")
+        # Calculate total profit in % (sum of individual trade % gains)
+        total_profit_pct = trades_df['Pct Gain (%)'].sum()
+
+        # You can also calculate total number of trades and average gain per trade:
+        total_trades = len(trades_df)
+        avg_gain_pct = trades_df['Pct Gain (%)'].mean()
+
+        # Create a summary DataFrame with one row
+        summary_df = pd.DataFrame({
+            'Ticker': ['TOTAL'],
+            'Buy Date': ['-'],
+            'Buy Price': ['-'],
+            'Pct Below 100MA at Buy (%)': ['-'],
+            'Sell Date': ['-'],
+            'Sell Price': ['-'],
+            'Pct Gain (%)': [total_profit_pct],
+            'Holding Days': ['-'],
+            'Total Trades': [total_trades],
+            'Average Gain (%)': [avg_gain_pct]
+        })
+
+        # Append the summary row to the original DataFrame
+        output_df = pd.concat([trades_df, summary_df], ignore_index=True)
+
+        output_df.to_csv(os.path.join(results_dir, f"{theYear}_perf.csv"), index=False)
+        print(f"Saved results with summary to {os.path.join(results_dir, f'{theYear}_perf.csv')}")
     else:
         print("No trades found for the given year and criteria.")
 
