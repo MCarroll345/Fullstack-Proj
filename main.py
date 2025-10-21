@@ -2,11 +2,12 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
 
 def play():
     print("Code generated using GPT-4.1-mini")
 
-    theYear = 2024  # Year to analyze
+    theYear = 2020 # Year to analyze
     data_dir = "sp500_stock_data"
     results_dir = "results"
     plots_dir = "plots"
@@ -137,11 +138,11 @@ def play():
             if position is None:
                 # Buy Conditions:
                 price_discount = (hma_100 - adj_close) / hma_100 if hma_100 != 0 else 0
-                cond_price = price_discount >= 0.10
+                cond_price = price_discount >= 0.12
                 cond_rsi = rsi < 30
                 cond_stoch = (prev_k < prev_d) and (stoch_k > stoch_d) and (stoch_k < 40)
-                cond_vol = volume > 1.2 * avg_vol
-                cond_volatility = (atr / adj_close < 0.05) and (bb_lower < adj_close < bb_upper)
+                cond_vol = volume > 1.1 * avg_vol
+                cond_volatility = (atr / adj_close < 0.2) and (bb_lower < adj_close < bb_upper)
 
                 buy_signal = all([cond_price,cond_volatility,cond_vol,cond_stoch,cond_rsi])
 
@@ -164,7 +165,7 @@ def play():
                     max_price = adj_close
 
                 cond_price_sell = adj_close > ema_100
-                cond_trailing_stop = adj_close < 0.96 * max_price
+                cond_trailing_stop = adj_close < 0.97 * max_price
                 cond_atr_stop = adj_close < position['Stop Loss']
                 cond_rsi_sell = rsi > 65
                 cond_macd_sell = (macd_hist < 0) and (prev_macd_hist >= 0)
@@ -231,6 +232,12 @@ def play():
     # Compile all trades into DataFrame
     trades_df = pd.DataFrame(all_trades)
     if not trades_df.empty:
+        graphs_dir = os.path.join(results_dir, "graphs")
+        os.makedirs(graphs_dir, exist_ok=True)
+        summ_dir = os.path.join(results_dir, "summaries")
+        os.makedirs(summ_dir, exist_ok=True)
+        perf_dir = os.path.join(results_dir, "performance")
+        os.makedirs(perf_dir, exist_ok=True)
         # Calculate total profit in % (sum of individual trade % gains)
         total_profit_pct = trades_df['Pct Gain (%)'].sum()
 
@@ -255,8 +262,46 @@ def play():
         # Append the summary row to the original DataFrame
         output_df = pd.concat([trades_df, summary_df], ignore_index=True)
 
-        output_df.to_csv(os.path.join(results_dir, f"{theYear}_perf.csv"), index=False)
-        print(f"Saved results with summary to {os.path.join(results_dir, f'{theYear}_perf.csv')}")
+        output_df.to_csv(os.path.join(perf_dir, f"{theYear}_perf.csv"), index=False)
+        print(f"Saved results with summary to {os.path.join(perf_dir, f'{theYear}_perf.csv')}")
+
+        # --- New summary for wins/losses ---
+        wins = trades_df[trades_df['Pct Gain (%)'] > 0]
+        losses = trades_df[trades_df['Pct Gain (%)'] <= 0]
+
+        total_wins = len(wins)
+        total_losses = len(losses)
+        total_money_won = wins['Pct Gain (%)'].sum()  # sum of % gains on wins
+        total_money_lost = losses['Pct Gain (%)'].sum()  # sum of % gains on losses (negative)
+        net_profit_loss = total_money_won + total_money_lost
+
+        summary_simple = pd.DataFrame({
+            'Total Wins': [total_wins],
+            'Total Losses': [total_losses],
+            'Total Money Won (%)': [total_money_won],
+            'Total Money Lost (%)': [total_money_lost],
+            'Net Profit/Loss (%)': [net_profit_loss]
+        })
+
+        summary_simple.to_csv(os.path.join(summ_dir, f"{theYear}_wins_losses_summary.csv"), index=False)
+        print(f"Saved simplified win/loss summary to {os.path.join(summ_dir, f'{theYear}_wins_losses_summary.csv')}")
+
+        # --- Plot profits and losses ---
+        plt.figure(figsize=(12, 6))
+        profits = trades_df['Pct Gain (%)']
+
+        plt.plot(trades_df.index, profits, marker='o', linestyle='-', color='blue')
+        plt.axhline(0, color='black', linewidth=0.8)
+        plt.title(f'Trade Profits and Losses in {theYear}')
+        plt.xlabel('Trade Number')
+        plt.ylabel('Profit / Loss (%)')
+        plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter())
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(graphs_dir, f"{theYear}_profits_losses_line.png"))
+        plt.close()
+
+        print(f"Saved profit/loss line graph to {os.path.join(graphs_dir, f'{theYear}_profits_losses_line.png')}")
     else:
         print("No trades found for the given year and criteria.")
 
