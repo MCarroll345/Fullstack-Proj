@@ -1,309 +1,331 @@
+"""
+sp500_trading_backtest.py
+
+Backtest script that predicts buy/sell times without looking into the future.
+
+Features:
+- Loads CSV files from a folder `sp500_stock_data/` (expects files like `AAPL.csv`, `MSFT.csv`)
+- Two strategies included:
+    1) Moving Average Crossover (fast/slow MA) -- deterministic, no ML.
+    2) Walk-forward ML classifier (optional, commented and experimental)
+- Produces a spreadsheet of trades for the chosen year with columns:
+    Ticker, Buy Date, Buy Price, Sell Date, Sell Price, Percentage Profit
+- Produces charts for each ticker traded with buy/sell markers saved to `plots/`
+- Adjustable variables to ensure a finite number of trades (max trades per ticker, min days between trades)
+
+Usage:
+    python sp500_trading_backtest.py --folder sp500_stock_data --year 2020
+
+Notes:
+- The script never uses future information when making a prediction or deciding a trade.
+- The ML walk-forward section trains only on historical data up to the prediction day.
+- Requires: pandas, numpy, matplotlib, tqdm, scikit-learn (if you use the ML section)
+
+"""
+
 import os
+import argparse
+from datetime import datetime
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mtick
+from tqdm import tqdm
 
-def play():
-    print("Code generated using GPT-4.1-mini")
+# ----------------------
+# Parameters you can tune
+# ----------------------
+FOLDER = 'sp500_stock_data'
+OUTPUT_TRADES_CSV = 'trades_{year}.csv'
+PLOTS_DIR = 'plots'
 
-    theYear = 2019 # Year to analyze
-    data_dir = "sp500_stock_data"
-    results_dir = "results"
-    plots_dir = "plots"
-    os.makedirs(results_dir, exist_ok=True)
-    os.makedirs(plots_dir, exist_ok=True)
+# Strategy parameters (MA crossover) - adjust to change trade count
+FAST_MA = 10          # shorter moving average window (days)
+SLOW_MA = 30          # longer moving average window (days)
+MIN_DAYS_BETWEEN_TRADES = 10  # to avoid too many trades
+MAX_TRADES_PER_TICKER = 10    # finite limit per ticker
+TAKE_PROFIT = 0.10    # 10% take profit (optional exit)
+STOP_LOSS = -0.05     # -5% stop loss (optional exit)
 
-    # --- Indicator functions ---
-    def EMA(series, span):
-        return series.ewm(span=span, adjust=False).mean()
+# Trading rules
+MIN_VOLUME = 1000     # ignore very illiquid rows (optional)
+PRICE_COL = 'Adj Close'  # column to use as execution price
+DATE_COL = 'Date'
 
-    def SMA(series, window):
-        return series.rolling(window).mean()
+# ----------------------
+# Helper functions
+# ----------------------
 
-    def HMA(series, window):
-        # Hull Moving Average
-        def WMA(s, n):
-            weights = np.arange(1, n + 1)
-            return s.rolling(n).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
-        half = int(window / 2)
-        sqrt = int(np.sqrt(window))
-        wma1 = WMA(series, half)
-        wma2 = WMA(series, window)
-        diff = 2 * wma1 - wma2
-        hma = WMA(diff, sqrt)
-        return hma
+def load_csv_for_ticker(path):
+    df = pd.read_csv(path, parse_dates=[DATE_COL])
+    # normalize column names
+    df.columns = [c.strip() for c in df.columns]
+    if DATE_COL not in df.columns:
+        # try lowercase date
+        if 'date' in df.columns:
+            df.rename(columns={'date': DATE_COL}, inplace=True)
+    df = df.sort_values(DATE_COL).reset_index(drop=True)
+    return df
 
-    def RSI(series, period=14):
-        delta = series.diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
 
-    def MACD(series, fast=12, slow=26, signal=9):
-        ema_fast = EMA(series, fast)
-        ema_slow = EMA(series, slow)
-        macd_line = ema_fast - ema_slow
-        signal_line = EMA(macd_line, signal)
-        hist = macd_line - signal_line
-        return macd_line, signal_line, hist
+def compute_indicators(df):
+    # compute returns and moving averages
+    df = df.copy()
+    df['return_1d'] = df[PRICE_COL].pct_change()
+    df['ma_fast'] = df[PRICE_COL].rolling(FAST_MA, min_periods=1).mean()
+    df['ma_slow'] = df[PRICE_COL].rolling(SLOW_MA, min_periods=1).mean()
+    df['ma_diff'] = df['ma_fast'] - df['ma_slow']
+    return df
 
-    def Stochastic(df, k_period=14, d_period=3):
-        low_min = df['Low'].rolling(k_period).min()
-        high_max = df['High'].rolling(k_period).max()
-        k = 100 * (df['Close'] - low_min) / (high_max - low_min)
-        d = k.rolling(d_period).mean()
-        return k, d
 
-    def ATR(df, period=14):
-        high_low = df['High'] - df['Low']
-        high_close = np.abs(df['High'] - df['Close'].shift())
-        low_close = np.abs(df['Low'] - df['Close'].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = tr.rolling(period).mean()
-        return atr
+# Simple backtest using MA crossover
+# No lookahead: signal on day t is computed using data up to t (rolling windows)
+# and trade is executed at the next day's open (we use next day's price as execution if available)
 
-    def Bollinger_Bands(series, window=20, num_std=2):
-        sma = SMA(series, window)
-        std = series.rolling(window).std()
-        upper = sma + num_std * std
-        lower = sma - num_std * std
-        return upper, lower
+def backtest_ma_crossover(df, year, max_trades_per_ticker=MAX_TRADES_PER_TICKER,
+                          min_days_between=MIN_DAYS_BETWEEN_TRADES):
+    trades = []
+    df = compute_indicators(df)
+    df['year'] = df[DATE_COL].dt.year
+    df_year = df[df['year'] == int(year)].reset_index(drop=True)
+    if df_year.empty:
+        return pd.DataFrame(trades)
 
-    all_trades = []
+    position = None
+    last_trade_day = None
+    trades_done = 0
 
-    # Process each stock file
-    for filename in os.listdir(data_dir):
-        if not filename.endswith(".csv"):
-            continue
-        filepath = os.path.join(data_dir, filename)
-        df = pd.read_csv(filepath, parse_dates=['Date'])
-        df.sort_values('Date', inplace=True)
-        ticker = df['Ticker'].iloc[0]
+    # Iterate day by day
+    for i in range(len(df_year)-1):
+        today = df_year.loc[i]
+        tomorrow = df_year.loc[i+1]  # execution at next day's price (no lookahead beyond that)
 
-        # Calculate indicators on full dataset
-        df['EMA_100'] = EMA(df['Adj Close'], 100)
-        df['HMA_100'] = HMA(df['Adj Close'], 100)
-        df['RSI_14'] = RSI(df['Adj Close'], 14)
-        macd_line, signal_line, macd_hist = MACD(df['Adj Close'])
-        df['MACD_hist'] = macd_hist
-        k, d = Stochastic(df)
-        df['Stoch_%K'] = k
-        df['Stoch_%D'] = d
-        df['ATR_14'] = ATR(df, 14)
-        df['BB_upper'], df['BB_lower'] = Bollinger_Bands(df['Adj Close'], 20, 2)
-        df['Avg_Vol_20'] = df['Volume'].rolling(20).mean()
-
-        # Filter for theYear
-        year_data = df[df['Date'].dt.year == theYear].reset_index(drop=True)
-        if year_data.empty:
+        # skip illiquid days
+        if 'Volume' in df_year.columns and (pd.isna(today['Volume']) or today['Volume'] < MIN_VOLUME):
             continue
 
-        position = None
-        trades = []
+        # apply constraints
+        if trades_done >= max_trades_per_ticker:
+            break
+        if last_trade_day is not None and (today[DATE_COL] - last_trade_day).days < min_days_between:
+            continue
 
-        # Pre-shift columns for previous values to simplify logic
-        year_data['Prev_MACD_hist'] = year_data['MACD_hist'].shift(1)
-        year_data['Prev_Stoch_%K'] = year_data['Stoch_%K'].shift(1)
-        year_data['Prev_Stoch_%D'] = year_data['Stoch_%D'].shift(1)
+        # generate buy signal: fast MA crosses above slow MA (ma_diff turns positive)
+        # We compute the sign change using today's ma_diff and previous day's ma_diff computed on historical data
+        if i == 0:
+            prev_ma_diff = np.nan
+        else:
+            prev_ma_diff = df_year.loc[i-1]['ma_diff']
 
-        for i, row in year_data.iterrows():
-            date = row['Date']
-            adj_close = row['Adj Close']
-            volume = row['Volume']
-            avg_vol = row['Avg_Vol_20']
-            ema_100 = row['EMA_100']
-            hma_100 = row['HMA_100']
-            rsi = row['RSI_14']
-            macd_hist = row['MACD_hist']
-            prev_macd_hist = row['Prev_MACD_hist']
-            stoch_k = row['Stoch_%K']
-            stoch_d = row['Stoch_%D']
-            prev_k = row['Prev_Stoch_%K']
-            prev_d = row['Prev_Stoch_%D']
-            atr = row['ATR_14']
-            bb_upper = row['BB_upper']
-            bb_lower = row['BB_lower']
-            month = date.month
+        ma_diff_today = today['ma_diff']
 
-            # Skip if indicators missing
-            if pd.isna([ema_100, hma_100, rsi, macd_hist, stoch_k, stoch_d, prev_macd_hist,
-                        prev_k, prev_d, atr, avg_vol, bb_upper, bb_lower]).any():
-                continue
+        buy_signal = False
+        sell_signal = False
 
-            if position is None:
-                # Buy Conditions:
-                price_discount = (hma_100 - adj_close) / hma_100 if hma_100 != 0 else 0
-                cond_price = price_discount >= 0.12
-                cond_rsi = rsi < 30
-                cond_stoch = (prev_k < prev_d) and (stoch_k > stoch_d) and (stoch_k < 40)
-                cond_vol = volume > 1.1 * avg_vol
-                cond_volatility = (atr / adj_close < 0.2) and (bb_lower < adj_close < bb_upper)
-
-                buy_signal = all([cond_price,cond_volatility,cond_vol,cond_stoch,cond_rsi])
-
-                if buy_signal:
-                    position = {
-                        'Buy Date': date,
-                        'Buy Price': adj_close,
-                        'Buy HMA_100': hma_100,
-                        'Buy Index': i,
-                        'Max Price': adj_close,
-                        'Stop Loss': adj_close - 2 * atr
-                    }
-
+        if position is None:
+            # buy when ma_diff crosses from <=0 to >0
+            if (not pd.isna(prev_ma_diff)) and prev_ma_diff <= 0 and ma_diff_today > 0:
+                buy_signal = True
+        else:
+            # sell when ma_diff crosses from >=0 to <0 OR stop loss / take profit reached
+            if (not pd.isna(prev_ma_diff)) and prev_ma_diff >= 0 and ma_diff_today < 0:
+                sell_signal = True
             else:
-                holding_days = (date - position['Buy Date']).days
-                max_price = position['Max Price']
+                # check stop loss / take profit against today's close (we'll execute sell next day)
+                current_ret = today[PRICE_COL] / position['buy_price'] - 1
+                if current_ret >= TAKE_PROFIT or current_ret <= STOP_LOSS:
+                    sell_signal = True
 
-                if adj_close > max_price:
-                    position['Max Price'] = adj_close
-                    max_price = adj_close
+        # Execute buy at tomorrow's price
+        if buy_signal and position is None:
+            buy_price = tomorrow[PRICE_COL]
+            buy_date = tomorrow[DATE_COL]
+            position = {'buy_date': buy_date, 'buy_price': buy_price, 'ticker': today.get('Ticker', None)}
+            last_trade_day = buy_date
+            trades_done += 1
 
-                cond_price_sell = adj_close > ema_100
-                cond_trailing_stop = adj_close < 0.97 * max_price
-                cond_atr_stop = adj_close < position['Stop Loss']
-                cond_rsi_sell = rsi > 65
-                cond_macd_sell = (macd_hist < 0) and (prev_macd_hist >= 0)
-                cond_max_days = holding_days > 60
-                cond_eoy = (i == len(year_data) - 1)
+        # Execute sell at tomorrow's price
+        if sell_signal and position is not None:
+            sell_price = tomorrow[PRICE_COL]
+            sell_date = tomorrow[DATE_COL]
+            pct = (sell_price / position['buy_price'] - 1) * 100
+            trades.append({
+                'Ticker': position.get('ticker', ''),
+                'Buy Date': position['buy_date'].strftime('%Y-%m-%d'),
+                'Buy Price': round(position['buy_price'], 4),
+                'Sell Date': sell_date.strftime('%Y-%m-%d'),
+                'Sell Price': round(sell_price, 4),
+                'Percentage Profit': round(pct, 4)
+            })
+            position = None
+            last_trade_day = sell_date
 
-                sell_signal = any([
-                    cond_price_sell,
-                    cond_trailing_stop,
-                    cond_atr_stop,
-                    cond_rsi_sell,
-                    cond_macd_sell,
-                    cond_max_days,
-                    cond_eoy
-                ])
-
-                if sell_signal:
-                    buy_price = position['Buy Price']
-                    pct_below_ma = (position['Buy HMA_100'] - buy_price) / position['Buy HMA_100'] * 100
-                    pct_gain = (adj_close - buy_price) / buy_price * 100
-                    trades.append({
-                        'Ticker': ticker,
-                        'Buy Date': position['Buy Date'],
-                        'Buy Price': buy_price,
-                        'Pct Below 100MA at Buy (%)': pct_below_ma,
-                        'Sell Date': date,
-                        'Sell Price': adj_close,
-                        'Pct Gain (%)': pct_gain,
-                        'Holding Days': holding_days
-                    })
-                    position = None
-
-        if trades:
-            all_trades.extend(trades)
-
-            # Plotting
-            plot_data = df[df['Date'].dt.year == theYear]
-            plt.figure(figsize=(14,7))
-            plt.plot(plot_data['Date'], plot_data['Adj Close'], label='Adj Close')
-            plt.plot(plot_data['Date'], plot_data['HMA_100'], label='HMA 100')
-            plt.plot(plot_data['Date'], plot_data['EMA_100'], label='EMA 100')
-
-            # Add buy/sell vertical lines
-            for trade in trades:
-                buy_date = trade['Buy Date']
-                sell_date = trade['Sell Date']
-                plt.axvline(buy_date, color='green', linestyle='--', alpha=0.7, label='Buy Signal')
-                plt.axvline(sell_date, color='red', linestyle='--', alpha=0.7, label='Sell Signal')
-
-            plt.title(f"{ticker} {theYear} Trades")
-            plt.xlabel("Date")
-            plt.ylabel("Price")
-            plt.legend(loc='upper left')
-
-            # Avoid duplicate labels in legend
-            handles, labels = plt.gca().get_legend_handles_labels()
-            by_label = dict(zip(labels, handles))
-            plt.legend(by_label.values(), by_label.keys())
-
-            plt.tight_layout()
-            plt.savefig(os.path.join(plots_dir, f"{ticker}_{theYear}.png"))
-            plt.close()
-
-    # Compile all trades into DataFrame
-    trades_df = pd.DataFrame(all_trades)
-    if not trades_df.empty:
-        graphs_dir = os.path.join(results_dir, "graphs")
-        os.makedirs(graphs_dir, exist_ok=True)
-        summ_dir = os.path.join(results_dir, "summaries")
-        os.makedirs(summ_dir, exist_ok=True)
-        perf_dir = os.path.join(results_dir, "performance")
-        os.makedirs(perf_dir, exist_ok=True)
-        # Calculate total profit in % (sum of individual trade % gains)
-        total_profit_pct = trades_df['Pct Gain (%)'].sum()
-
-        # You can also calculate total number of trades and average gain per trade:
-        total_trades = len(trades_df)
-        avg_gain_pct = trades_df['Pct Gain (%)'].mean()
-
-        # Create a summary DataFrame with one row
-        summary_df = pd.DataFrame({
-            'Ticker': ['TOTAL'],
-            'Buy Date': ['-'],
-            'Buy Price': ['-'],
-            'Pct Below 100MA at Buy (%)': ['-'],
-            'Sell Date': ['-'],
-            'Sell Price': ['-'],
-            'Pct Gain (%)': [total_profit_pct],
-            'Holding Days': ['-'],
-            'Total Trades': [total_trades],
-            'Average Gain (%)': [avg_gain_pct]
+    # If still holding at the end of year, close at last available price
+    if position is not None:
+        last_row = df_year.iloc[-1]
+        sell_price = last_row[PRICE_COL]
+        sell_date = last_row[DATE_COL]
+        pct = (sell_price / position['buy_price'] - 1) * 100
+        trades.append({
+            'Ticker': position.get('ticker', ''),
+            'Buy Date': position['buy_date'].strftime('%Y-%m-%d'),
+            'Buy Price': round(position['buy_price'], 4),
+            'Sell Date': sell_date.strftime('%Y-%m-%d'),
+            'Sell Price': round(sell_price, 4),
+            'Percentage Profit': round(pct, 4)
         })
 
-        # Append the summary row to the original DataFrame
-        output_df = pd.concat([trades_df, summary_df], ignore_index=True)
+    trades_df = pd.DataFrame(trades)
+    return trades_df
 
-        output_df.to_csv(os.path.join(perf_dir, f"{theYear}_perf.csv"), index=False)
-        print(f"Saved results with summary to {os.path.join(perf_dir, f'{theYear}_perf.csv')}")
 
-        # --- New summary for wins/losses ---
-        wins = trades_df[trades_df['Pct Gain (%)'] > 0]
-        losses = trades_df[trades_df['Pct Gain (%)'] <= 0]
+# Plot function with buy/sell markers
 
-        total_wins = len(wins)
-        total_losses = len(losses)
-        total_money_won = wins['Pct Gain (%)'].sum()  # sum of % gains on wins
-        total_money_lost = losses['Pct Gain (%)'].sum()  # sum of % gains on losses (negative)
-        net_profit_loss = total_money_won + total_money_lost
+def plot_trades(df, trades_df, ticker, year, outdir=PLOTS_DIR):
+    os.makedirs(outdir, exist_ok=True)
+    df = df.copy()
+    df['year'] = df[DATE_COL].dt.year
+    df_year = df[df['year'] == int(year)].reset_index(drop=True)
+    if df_year.empty:
+        return None
 
-        summary_simple = pd.DataFrame({
-            'Total Wins': [total_wins],
-            'Total Losses': [total_losses],
-            'Total Money Won (%)': [total_money_won],
-            'Total Money Lost (%)': [total_money_lost],
-            'Net Profit/Loss (%)': [net_profit_loss]
-        })
+    fig, ax = plt.subplots(figsize=(12,6))
+    ax.plot(df_year[DATE_COL], df_year[PRICE_COL], label=f'{ticker} {PRICE_COL}')
+    # plot moving averages
+    if 'ma_fast' in df_year.columns:
+        ax.plot(df_year[DATE_COL], df_year['ma_fast'], linestyle='--', linewidth=1, label=f'MA{FAST_MA}')
+    if 'ma_slow' in df_year.columns:
+        ax.plot(df_year[DATE_COL], df_year['ma_slow'], linestyle='-', linewidth=1, label=f'MA{SLOW_MA}')
 
-        summary_simple.to_csv(os.path.join(summ_dir, f"{theYear}_wins_losses_summary.csv"), index=False)
-        print(f"Saved simplified win/loss summary to {os.path.join(summ_dir, f'{theYear}_wins_losses_summary.csv')}")
+    # overlay trades
+    my_trades = trades_df[trades_df['Ticker'] == ticker]
+    for _, row in my_trades.iterrows():
+        buy_date = pd.to_datetime(row['Buy Date'])
+        sell_date = pd.to_datetime(row['Sell Date'])
+        # find price points if they exist in df_year, otherwise skip marker
+        b_price = row['Buy Price']
+        s_price = row['Sell Price']
+        ax.scatter([buy_date], [b_price], marker='^', s=100, label='Buy')
+        ax.scatter([sell_date], [s_price], marker='v', s=100, label='Sell')
+        ax.plot([buy_date, sell_date], [b_price, s_price], linestyle=':', linewidth=1)
 
-        # --- Plot profits and losses ---
-        plt.figure(figsize=(12, 6))
-        profits = trades_df['Pct Gain (%)']
+    ax.set_title(f'{ticker} trades in {year}')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Price')
+    ax.legend()
+    fname = os.path.join(outdir, f'{ticker}_{year}.png')
+    plt.tight_layout()
+    fig.savefig(fname)
+    plt.close(fig)
+    return fname
 
-        plt.plot(trades_df.index, profits, marker='o', linestyle='-', color='blue')
-        plt.axhline(0, color='black', linewidth=0.8)
-        plt.title(f'Trade Profits and Losses in {theYear}')
-        plt.xlabel('Trade Number')
-        plt.ylabel('Profit / Loss (%)')
-        plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter())
 
-        plt.tight_layout()
-        plt.savefig(os.path.join(graphs_dir, f"{theYear}_profits_losses_line.png"))
-        plt.close()
+# Main orchestration
 
-        print(f"Saved profit/loss line graph to {os.path.join(graphs_dir, f'{theYear}_profits_losses_line.png')}")
+def main(folder, year, strategy='ma'):
+    all_trades = []
+    files = [f for f in os.listdir(folder) if f.lower().endswith('.csv')]
+    if not files:
+        print('No CSV files found in', folder)
+        return
+
+    for f in tqdm(files, desc='Tickers'):
+        ticker = os.path.splitext(f)[0]
+        path = os.path.join(folder, f)
+        try:
+            df = load_csv_for_ticker(path)
+        except Exception as e:
+            print('Failed to load', f, 'error:', e)
+            continue
+
+        # ensure price column exists
+        if PRICE_COL not in df.columns:
+            # try common variants
+            for alt in ['Adj Close', 'Adj_Close', 'Close']:
+                if alt in df.columns:
+                    df[PRICE_COL] = df[alt]
+                    break
+        if PRICE_COL not in df.columns:
+            print('No suitable price column for', ticker)
+            continue
+
+        # add Ticker column for later use
+        df['Ticker'] = ticker
+
+        if strategy == 'ma':
+            trades_df = backtest_ma_crossover(df, year)
+        else:
+            # placeholder for other strategies
+            trades_df = backtest_ma_crossover(df, year)
+
+        if not trades_df.empty:
+            # fill ticker column if empty
+            trades_df['Ticker'] = trades_df['Ticker'].replace('', ticker)
+            all_trades.append(trades_df)
+            # plot
+            plot_trades(df, trades_df, ticker, year)
+
+    if all_trades:
+        result = pd.concat(all_trades, ignore_index=True)
     else:
-        print("No trades found for the given year and criteria.")
+        result = pd.DataFrame(columns=['Ticker','Buy Date','Buy Price','Sell Date','Sell Price','Percentage Profit'])
 
-# To run the strategy:
-play()
+    outcsv = OUTPUT_TRADES_CSV.format(year=year)
+    result.to_csv(outcsv, index=False)
+    print(f'Saved trades to {outcsv}')
+    print(f'Saved plots to {PLOTS_DIR}')
+
+    # ---- Summary statistics ----
+    if not result.empty:
+        avg_gain = result['Percentage Profit'].mean()
+        total_gain = result['Percentage Profit'].sum()
+        median_gain = result['Percentage Profit'].median()
+        win_rate = (result['Percentage Profit'] > 0).mean() * 100
+
+        print("\n=== Trade Summary ===")
+        print(f"Total trades: {len(result)}")
+        print(f"Average % profit per trade: {avg_gain:.2f}%")
+        print(f"Median % profit per trade: {median_gain:.2f}%")
+        print(f"Total % gain (sum of trades): {total_gain:.2f}%")
+        print(f"Win rate: {win_rate:.1f}%")
+
+        # Optional: summary by ticker
+        summary = (
+            result.groupby('Ticker')['Percentage Profit']
+            .agg(['count', 'mean', 'sum'])
+            .rename(columns={'count': 'Num Trades', 'mean': 'Avg % Profit', 'sum': 'Total % Profit'})
+            .sort_values('Total % Profit', ascending=False)
+        )
+        summary_csv = f'summary_{year}.csv'
+        summary.to_csv(summary_csv)
+        print(f"\nSaved per-ticker summary to {summary_csv}")
+    else:
+        print("\nNo trades were executed for this year.")
+
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--folder', default=FOLDER, help='Folder containing ticker CSVs')
+    parser.add_argument('--year', required=True, help='Year to test (e.g. 2020)')
+    parser.add_argument('--strategy', default='ma', choices=['ma'], help='Which strategy to run')
+    args = parser.parse_args()
+    main(args.folder, args.year, strategy=args.strategy)
+
+
+# ----------------------
+# Optional: Walk-forward ML (advanced)
+# ----------------------
+# The following outlines a walk-forward approach you can implement if you want a predictive
+# model that "learns" from past data without looking into the future. It is intentionally
+# left commented because it requires scikit-learn and careful testing. If you'd like, I can
+# enable and tune this section for you.
+#
+# Basic idea:
+# 1. Build features for each date (returns, MAs, RSI, volume features, etc.) using only past data
+# 2. Define a label using forward return over N days (e.g. 5 days) > threshold (this label is only
+#    available for training; when predicting at day t you must only use features up to t)
+# 3. For each prediction day t in the test year, train the model on all historical data up to t-1
+#    and predict for day t. If model predicts positive, buy at t+1 open and hold until opposite signal.
+#
+# This walk-forward is slower but respects the no-lookahead rule.
+# ----------------------
