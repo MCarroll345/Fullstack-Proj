@@ -7,7 +7,7 @@ import matplotlib.ticker as mtick
 def play():
     print("Code generated using GPT-4.1-mini")
 
-    theYear = 2020 # Year to analyze
+    theYear = 2019 # Year to analyze
     data_dir = "sp500_stock_data"
     results_dir = "results"
     plots_dir = "plots"
