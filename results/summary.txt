@@ -1,0 +1,8 @@
+BACKTEST SUMMARY
+Period: 2015-08-04 to 2025-08-04
+Initial equity: $100,000.00
+Final equity:   $114,054.69
+Total compounded gain: 14.05%
+Average annual gain (CAGR-like): 1.32% (based on 10.00 years)
+Total trades: 12  Wins: 8  Losses: 4
+Average trade return: 1.20%
