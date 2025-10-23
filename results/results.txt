@@ -1,0 +1,35 @@
+=============================================
+📈 SINGLE-POSITION STRATEGY RESULTS SUMMARY
+=============================================
+
+>> STRATEGY OVERVIEW <<
+Buys deeply oversold S&P 500 stocks when:
+- Price < 88% of HMA(100)
+- RSI(14) < 30
+- Stochastic bullish crossover (%K crosses above %D)
+- Volume > 1.1 × 20-day avg
+- ATR < 20% of price and within Bollinger Bands
+
+Sells when:
+- Price crosses above EMA(100), RSI > 65, or MACD flips negative
+- Price drops 3% from max or below 2×ATR stop loss
+- Held > 60 days or at year-end
+
+---------------------------------------------
+>> YEARLY PERFORMANCE <<
+
+2016.0: Return = 0.39%, Cumulative = 0.39%, Equity = $100.39
+2017.0: Return = 41.69%, Cumulative = 42.08%, Equity = $142.24
+2018.0: Return = -10.17%, Cumulative = 31.91%, Equity = $127.77
+2019.0: Return = 32.28%, Cumulative = 64.19%, Equity = $169.02
+2020.0: Return = -29.80%, Cumulative = 34.39%, Equity = $118.65
+2021.0: Return = -35.15%, Cumulative = -0.77%, Equity = $76.94
+2022.0: Return = 37.76%, Cumulative = 37.00%, Equity = $106.00
+2023.0: Return = 46.24%, Cumulative = 83.24%, Equity = $155.01
+2024.0: Return = -17.24%, Cumulative = 66.00%, Equity = $128.28
+2025.0: Return = 11.93%, Cumulative = 77.93%, Equity = $143.59
+
+---------------------------------------------
+Average Annual Gain: 7.79%
+Total Compounded Gain: 43.59% over 10 years
+Final Equity: $143.59

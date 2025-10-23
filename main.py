@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 
 def play():
-    print("Code generated and updated for single-position trading over 10 years with equity curve and average summary (GPT-5)")
+    print("Code generated for single-position trading over 10 years(GPT-5)")
 
     data_dir = "sp500_stock_data"
     results_dir = "results"
@@ -106,6 +106,7 @@ def play():
         all_trades = []
 
         for current_date in all_dates_y:
+            # SELL LOGIC
             if global_position is not None:
                 ticker = global_position['Ticker']
                 df = yearly_data.get(ticker)
@@ -146,6 +147,7 @@ def play():
                     })
                     global_position = None
 
+            # BUY LOGIC
             elif global_position is None:
                 for ticker, df in yearly_data.items():
                     row = df[df['Date'] == current_date]
@@ -182,6 +184,41 @@ def play():
         if all_trades:
             all_trades_all_years.append(pd.DataFrame(all_trades))
             print(f"Executed {len(all_trades)} trades for {theYear}")
+
+                # === PLOT EACH TRADE ===
+            trade_plot_dir = os.path.join("plots", f"trade_plots_{theYear}")
+            os.makedirs(trade_plot_dir, exist_ok=True)
+
+            for trade in all_trades:
+                ticker = trade['Ticker']
+                df = yearly_data[ticker]
+                start_date = trade['Buy Date'] - pd.Timedelta(days=15)
+                end_date = trade['Sell Date'] + pd.Timedelta(days=15)
+                sub_df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
+
+                plt.figure(figsize=(10, 6))
+                plt.plot(sub_df['Date'], sub_df['Adj Close'], label='Adj Close', color='blue', linewidth=1.8)
+                plt.plot(sub_df['Date'], sub_df['EMA_100'], label='EMA(100)', color='orange', linestyle='--', alpha=0.7)
+                plt.plot(sub_df['Date'], sub_df['HMA_100'], label='HMA(100)', color='green', linestyle='--', alpha=0.7)
+
+                # Markers
+                plt.scatter(trade['Buy Date'], trade['Buy Price'], color='lime', s=100, marker='^', label='Buy', edgecolor='black')
+                plt.scatter(trade['Sell Date'], trade['Sell Price'], color='red', s=100, marker='v', label='Sell', edgecolor='black')
+
+                # Title & Labels
+                plt.title(f"{ticker} | {theYear}\nBuy: {trade['Buy Date'].date()}  →  Sell: {trade['Sell Date'].date()}  |  Gain: {trade['Pct Gain (%)']:.2f}%")
+                plt.xlabel("Date")
+                plt.ylabel("Adjusted Close ($)")
+                plt.legend()
+                plt.grid(True, linestyle='--', alpha=0.6)
+                plt.tight_layout()
+
+                filename = f"{ticker}_{trade['Buy Date'].date()}_{trade['Sell Date'].date()}.png".replace(":", "-")
+                plt.savefig(os.path.join(trade_plot_dir, filename))
+                plt.close()
+
+            print(f"Saved {len(all_trades)} trade charts to {trade_plot_dir}")
+
         else:
             print(f"No trades for {theYear}")
 
@@ -211,11 +248,11 @@ def play():
         })
         summary_all = pd.concat([yearly, summary_row], ignore_index=True)
 
-        # Save full summary
+        # Save CSV
         summary_path = os.path.join(results_dir, "summary_all_years.csv")
         summary_all.to_csv(summary_path, index=False)
 
-        # Plot equity curve
+        # Save equity curve
         plt.figure(figsize=(10, 6))
         plt.plot(yearly['Year'], yearly['Equity ($)'], marker='o', linewidth=2)
         plt.title("Equity Curve (10-Year Compounded Return)")
@@ -226,9 +263,39 @@ def play():
         plt.savefig(os.path.join(results_dir, "equity_curve_10yr.png"))
         plt.close()
 
+        # === SAVE RESULTS.TXT ===
+        txt_path = os.path.join(results_dir, "results.txt")
+        with open(txt_path, "w") as f:
+            f.write("=============================================\n")
+            f.write("📈 SINGLE-POSITION STRATEGY RESULTS SUMMARY\n")
+            f.write("=============================================\n\n")
+            f.write(">> STRATEGY OVERVIEW <<\n")
+            f.write("Buys deeply oversold S&P 500 stocks when:\n")
+            f.write("- Price < 88% of HMA(100)\n")
+            f.write("- RSI(14) < 30\n")
+            f.write("- Stochastic bullish crossover (%K crosses above %D)\n")
+            f.write("- Volume > 1.1 × 20-day avg\n")
+            f.write("- ATR < 20% of price and within Bollinger Bands\n\n")
+            f.write("Sells when:\n")
+            f.write("- Price crosses above EMA(100), RSI > 65, or MACD flips negative\n")
+            f.write("- Price drops 3% from max or below 2×ATR stop loss\n")
+            f.write("- Held > 60 days or at year-end\n\n")
+            f.write("---------------------------------------------\n")
+            f.write(">> YEARLY PERFORMANCE <<\n\n")
+            for _, row in yearly.iterrows():
+                f.write(f"{int(row['Year']) if isinstance(row['Year'], (int, np.integer)) else row['Year']}: "
+                        f"Return = {row['Pct Gain (%)']:.2f}%, "
+                        f"Cumulative = {row['Cumulative Return (%)']:.2f}%, "
+                        f"Equity = ${row['Equity ($)']:.2f}\n")
+            f.write("\n---------------------------------------------\n")
+            f.write(f"Average Annual Gain: {avg_annual_gain:.2f}%\n")
+            f.write(f"Total Compounded Gain: {total_gain:.2f}% over 10 years\n")
+            f.write(f"Final Equity: ${yearly['Equity ($)'].iloc[-1]:.2f}\n")
+
         print("\n✅ Saved:")
         print(f"  • {summary_path}")
         print(f"  • results/equity_curve_10yr.png")
+        print(f"  • results/results.txt")
         print(f"\n📊 Average Annual Gain: {avg_annual_gain:.2f}%")
         print(f"📈 Total Compounded Gain: {total_gain:.2f}% over 10 years")
     else:

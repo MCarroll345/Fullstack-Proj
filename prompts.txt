@@ -10,4 +10,8 @@ how do I add a section to the end of the result csv files to show total profit?
 
 optimise the sell requirements
 
-Write a complete Python script that backtests a single-position S&P 500 trading strategy over the last 10 years using daily CSV data in sp500_stock_data/, calculates EMA, HMA, RSI, MACD, Stochastic, ATR, and Bollinger Bands, executes buys/sells by defined technical rules, saves yearly trade results and summaries under results/, plots profit/loss and a 10-year equity curve, and includes a final summary with total compounded gain and average annual gain (%)
+Write a complete Python script that backtests a single-position S&P 500 trading strategy over the last 10 years using daily 
+CSV data in sp500_stock_data/, calculates EMA, HMA, RSI, MACD, Stochastic, ATR, and Bollinger Bands, executes buys/sells by 
+defined technical rules, saves yearly trade results and summaries under results/, plots profit/loss and a 10-year equity curve, 
+and includes a final summary in a results.txt file with total strategy, compounded gain and average annual gain (%), plot all 
+trades each year in plot folder
